@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  datadog-agent:
+    image: gcr.io/datadoghq/agent:7 #.28.0 #datadog/docker-dd-agent
+    container_name: datadog-agent
+    pid: host
+    environment:
+      - DD_APM_ENABLED=true # enabled by default/
+      - DD_LOGS_ENABLED=true
+      - DD_BIND_HOST=0.0.0.0
+      - DD_API_KEY=${API_KEY}
+      - DD_SITE=datadoghq.com
+      - DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true
+      - DD_DOGSTATSD_NON_LOCAL_TRAFFIC=true
+      - DD_HOSTNAME=localhost
+      # - LOG_LEVEL=DEBUG
+      # - DD_APM_DD_URL =https://trace.agent.datadoghq.com # .com is default, change to eu for nomad
+      - DD_CONTAINER_EXCLUDE=image:gcr.io/datadoghq/agent* # Don't send datadog agent logs to datadog
+      - DD_CONTAINER_EXCLUDE_METRICS=image:gcr.io/datadoghq/agent*
+      - DD_CONTAINER_EXCLUDE_LOGS=image:gcr.io/datadoghq/agent*
+      - DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT=0.0.0.0:4317 # There is also an HTTP endpoint but spicedb uses grpc
+    ports:
+      - "8126:8126"
+      - "8125:8125"
+      - "4317:4317"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup:/host/sys/fs/cgroup:ro
+
+  mysql:
+    image: mysql:8
+    container_name: mysql
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_DATABASE=spicedb
+      - MYSQL_USER=spicedb
+      - MYSQL_PASSWORD=secret
+      - MYSQL_ROOT_PASSWORD=root
+  
+  migrate:
+    image: "authzed/spicedb:v1.19.1" # This is not the latest version
+    container_name: migrate
+    command: "migrate head"
+    restart: "on-failure"
+    environment:
+      - SPICEDB_DATASTORE_ENGINE=mysql
+      - SPICEDB_DATASTORE_CONN_URI=spicedb:secret@(mysql:3306)/spicedb?parseTime=True
+      - SPICEDB_TELEMETRY_ENDPOINT= #http://datadog-agent:4318" #datadog-agent:4318"
+      - SPICEDB_LOG_FORMAT=json
+      - SPICEDB_LOG_LEVEL=trace
+      - SPICEDB_OTEL_PROVIDER=otlpgrpc
+      - SPICEDB_OTEL_TRACE_PROPAGATOR=b3 # Datadog uses a proprietary trace propagation format, but it also supports B3.
+      - SPICEDB_OTEL_SAMPLE_RATIO=1.0
+      # - "SPICEDB_OTEL_ENDPOINT=http://datadog-agent:4317/" 
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4317
+      - OTEL_SERVICE_NAME=spicedb
+      - OTEL_RESOURCE_ATTRIBUTES=version="${DATADOG_VERSION:-0.0.1},env=${DATADOG_ENV:-dd101-dev},service=${DATADOG_SERVICE:-spicedb}"
+    depends_on:
+      - mysql
+    labels:
+      com.datadoghq.tags.env: '${DATADOG_ENV:-dd101-dev}'
+      com.datadoghq.tags.service: '${DATADOG_SERVICE:-spicedb}'
+      com.datadoghq.tags.version: '${DATADOG_VERSION:-0.0.1}'
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "${DATADOG_SERVICE:-spicedb}"}]'
+      
+  spicedb:
+    image: "authzed/spicedb:v1.19.1"
+    container_name: spicedb
+    command: "serve"
+    restart: "always"
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+      - "50051:50051"
+    environment:
+      - SPICEDB_GRPC_PRESHARED_KEY=spicedb-key
+      - SPICEDB_DATASTORE_ENGINE=mysql
+      - SPICEDB_DATASTORE_CONN_URI=spicedb:secret@(mysql:3306)/spicedb?parseTime=True
+      - SPICEDB_TELEMETRY_ENDPOINT= #http://datadog-agent:4318" #datadog-agent:4318"
+      - SPICEDB_LOG_FORMAT=json
+      - SPICEDB_LOG_LEVEL=trace
+      - SPICEDB_OTEL_PROVIDER=otlpgrpc
+      - SPICEDB_OTEL_TRACE_PROPAGATOR=b3 # Datadog uses a proprietary trace propagation format, but it also supports B3.
+      - SPICEDB_OTEL_SAMPLE_RATIO=1.0"
+      # - SPICEDB_OTEL_ENDPOINT=http://datadog-agent:4317/ # It is said that both this env and OTEL_EXPORTER_.. are needed, but it breaks if I add this
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4317
+      - OTEL_SERVICE_NAME=${DATADOG_SERVICE:-spicedb}
+      - OTEL_RESOURCE_ATTRIBUTES="version=${DATADOG_VERSION:-0.0.1},env=${DATADOG_ENV:-dd101-dev},service=${DATADOG_SERVICE:-spicedb}"
+    depends_on:
+      - migrate
+      - datadog-agent
+      - mysql
+    labels:
+      com.datadoghq.tags.env: '${DATADOG_ENV:-dd101-dev}'
+      com.datadoghq.tags.service: '${DATADOG_SERVICE:-spicedb}'
+      com.datadoghq.tags.version: '${DATADOG_VERSION:-0.0.1}'
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "${DATADOG_SERVICE:-spicedb}"}]'
